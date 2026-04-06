@@ -7,7 +7,7 @@ import logging
 import sys
 from typing import Any, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # LogRecord attributes we do not merge into JSON (everything else is treated as structured extra)
@@ -73,7 +73,9 @@ def configure_logging(level: str = "INFO") -> logging.Logger:
 
 class Settings(BaseSettings):
     """
-    Environment variables use the same name as fields in UPPER_SNAKE_CASE
+    Deploy an existing Vertex AI Model Registry entry to an Endpoint.
+
+    Environment variables use UPPER_SNAKE_CASE matching each field name
     (pydantic-settings default), e.g. gcp_project_id -> GCP_PROJECT_ID.
     """
 
@@ -86,33 +88,35 @@ class Settings(BaseSettings):
     # --- GCP core ---
     gcp_project_id: str
     gcp_region: str = "us-central1"
-    gcs_bucket_name: str
-    """Bucket name only (no gs:// prefix)."""
 
-    gcs_model_artifact_prefix: str = "models/my-llm/1"
-    """Path inside the bucket to model artifacts (folder prefix)."""
+    # --- Optional staging (only needed if your workflow calls APIs that require it) ---
+    gcs_bucket_name: Optional[str] = None
+    """If set, default staging URI becomes gs://{name}/vertex-staging when STAGING_BUCKET_URI is unset."""
 
     staging_bucket_uri: Optional[str] = None
+    """Full gs:// URI for Vertex staging. Overrides gcs_bucket_name-based default."""
+
+    # --- Model Registry (existing model — no upload in this tool) ---
+    model_display_name: str = ""
     """
-    Optional gs:// URI for staging. Defaults to gs://{gcs_bucket_name}/vertex-staging
-    if unset.
+    Display name of the model in Vertex Model Registry (exact match).
+    Used when registry_model_resource_name is not set.
     """
 
-    # --- Model registry ---
-    model_display_name: str = "custom-llm"
-    model_description: str = "Custom LLM uploaded from GCS"
+    registry_model_resource_name: Optional[str] = None
+    """
+    Optional. Full resource name (projects/.../locations/.../models/ID), numeric model ID,
+    or name with version: .../models/ID@version_or_alias. When set, display name lookup is skipped.
+    """
 
-    # --- Serving container (must match your image: vLLM / PyTorch / TGI) ---
-    serving_container_image_uri: str
-    serving_container_predict_route: str = "/predict"
-    serving_container_health_route: str = "/health"
-    serving_container_ports: list[int] = Field(default_factory=lambda: [8080])
+    registry_model_version: Optional[str] = None
+    """Optional version ID or alias (used with registry_model_resource_name if it has no @version)."""
 
     # --- Endpoint ---
     endpoint_display_name: str = "custom-llm-endpoint"
     deployed_model_display_name: str = "custom-llm-deployed"
     endpoint_id: Optional[str] = None
-    """If set, deploy can target an existing endpoint; inference uses this ID."""
+    """If set, deploy targets this endpoint; inference uses this ID."""
 
     # --- Hardware ---
     use_gpu: bool = True
@@ -130,23 +134,24 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    @field_validator("serving_container_ports", mode="before")
-    @classmethod
-    def parse_ports(cls, v: Any) -> Any:
-        if isinstance(v, str):
-            return [int(p.strip()) for p in v.split(",") if p.strip()]
-        return v
+    @model_validator(mode="after")
+    def require_model_identity(self) -> Settings:
+        has_resource = bool(self.registry_model_resource_name and self.registry_model_resource_name.strip())
+        has_display = bool(self.model_display_name and self.model_display_name.strip())
+        if not has_resource and not has_display:
+            raise ValueError(
+                "Set MODEL_DISPLAY_NAME (registry display name) and/or REGISTRY_MODEL_RESOURCE_NAME "
+                "(model ID or full resource name)."
+            )
+        return self
 
     @property
-    def artifact_uri(self) -> str:
-        p = self.gcs_model_artifact_prefix.strip("/")
-        return f"gs://{self.gcs_bucket_name}/{p}"
-
-    @property
-    def staging_uri(self) -> str:
+    def staging_uri(self) -> Optional[str]:
         if self.staging_bucket_uri:
             return self.staging_bucket_uri.rstrip("/")
-        return f"gs://{self.gcs_bucket_name}/vertex-staging"
+        if self.gcs_bucket_name:
+            return f"gs://{self.gcs_bucket_name}/vertex-staging"
+        return None
 
 
 def get_settings() -> Settings:

@@ -1,47 +1,35 @@
-# Vertex AI custom LLM deployment
+# Vertex AI — deploy a registered model
 
-Python tooling to register a model from Google Cloud Storage on **Vertex AI Model Registry**, deploy it to an **Endpoint**, and run a test prediction via the SDK—no Console UI required.
+This project **only deploys models that already exist in Vertex AI Model Registry** (you or another process already uploaded artifacts and registered the model). You provide your **GCP project**, **region**, and **how to find that model** (display name or resource ID). The code creates or reuses an **Endpoint** and deploys the model with your chosen machine/GPU settings—no Console UI required.
 
 ---
 
 ## Prerequisites
 
-- **Python 3.10+** (3.12 works with the pinned dependencies).
-- **Google Cloud SDK** (`gcloud`) installed and on your `PATH`.
-- A **GCP project** with the **Vertex AI API** enabled and billing active.
-- **IAM**: your principal needs roles such as Vertex AI User and access to the GCS bucket (e.g. Storage Object Viewer on artifacts, and ability to write to the staging prefix if needed).
-- **Model weights** already uploaded under a prefix in a GCS bucket (e.g. `gs://your-bucket/models/my-llm/v1/...`).
-- A **serving container image** that matches how you run inference (Vertex prebuilt PyTorch images, or your own vLLM/TGI image). Routes and ports in `.env` must match that image.
+- **Python 3.10+**
+- **Google Cloud SDK** (`gcloud`) on your `PATH`
+- A **GCP project** with **Vertex AI API** enabled
+- **IAM**: principal can read the model, manage endpoints, and deploy (e.g. Vertex AI User / appropriate custom role)
+- **Model already registered** in Model Registry for the same project and region you configure (container spec and artifacts are on that Model resource)
 
 ---
 
-## 1. Clone or open the project
+## 1. Open the project
 
-Use this folder as the project root (the directory that contains `requirements.txt` and `src/`).
-
-All commands below assume the **current working directory is the project root**.
+Use the folder that contains `requirements.txt` and `src/` as the **project root**. All commands below run from there.
 
 ---
 
-## 2. Create the virtual environment and install dependencies
+## 2. Virtual environment and dependencies
 
-### Option A — Bash (Linux, macOS, Git Bash, WSL)
+### Bash (Linux, macOS, Git Bash, WSL)
 
 ```bash
 bash setup_env.sh
-```
-
-This creates `.venv`, installs `requirements.txt`, runs `gcloud auth application-default login`, and optionally sets the default project if `GCP_PROJECT_ID` is exported before running the script.
-
-After it finishes, activate the venv:
-
-```bash
 source .venv/bin/activate
 ```
 
-### Option B — Windows PowerShell
-
-If you do not use Bash, run the equivalent steps manually:
+### Windows PowerShell
 
 ```powershell
 cd "path\to\GCP Vertex AI"
@@ -55,48 +43,41 @@ gcloud config set project YOUR_PROJECT_ID
 
 ---
 
-## 3. Configure environment variables
+## 3. Configure `.env`
 
-Create a file named **`.env`** in the project root (same folder as `requirements.txt`). The app loads it automatically via `pydantic-settings`.
+Create **`.env`** in the project root.
 
 ### Required
 
 | Variable | Description |
 |----------|-------------|
 | `GCP_PROJECT_ID` | Your GCP project ID. |
-| `GCS_BUCKET_NAME` | Bucket name only (no `gs://`). |
-| `SERVING_CONTAINER_IMAGE_URI` | Full image URI for prediction (must match your region and serving stack). |
 
-### Strongly recommended
+### Identify the registered model (at least one required)
 
 | Variable | Description |
 |----------|-------------|
-| `GCP_REGION` | Vertex region (default: `us-central1`). |
-| `GCS_MODEL_ARTIFACT_PREFIX` | Path inside the bucket to the model folder (default: `models/my-llm/1`). Resolved as `gs://{GCS_BUCKET_NAME}/{prefix}`. |
+| `MODEL_DISPLAY_NAME` | Exact **display name** of the model in Model Registry (used if `REGISTRY_MODEL_RESOURCE_NAME` is not set). |
+| `REGISTRY_MODEL_RESOURCE_NAME` | Optional. **Numeric model ID**, full resource name (`projects/.../locations/.../models/123`), or include a version: `.../models/123@your-alias`. Skips listing by display name. |
+| `REGISTRY_MODEL_VERSION` | Optional. Version ID or alias when using resource name **without** `@version` in the string. |
 
-### Serving container (must match your image)
+If several models share the same display name, deploy uses the **newest** by `version_create_time` and logs a warning.
 
-| Variable | Default |
-|----------|---------|
-| `SERVING_CONTAINER_PREDICT_ROUTE` | `/predict` |
-| `SERVING_CONTAINER_HEALTH_ROUTE` | `/health` |
-| `SERVING_CONTAINER_PORTS` | `8080` (comma-separated for multiple) |
+### Region and endpoint
 
-### Endpoint naming
-
-| Variable | Default |
-|----------|---------|
-| `MODEL_DISPLAY_NAME` | `custom-llm` |
-| `ENDPOINT_DISPLAY_NAME` | `custom-llm-endpoint` |
-| `DEPLOYED_MODEL_DISPLAY_NAME` | `custom-llm-deployed` |
-| `ENDPOINT_ID` | Empty until after first deploy; set for inference and to deploy onto an existing endpoint. |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GCP_REGION` | `us-central1` | Must match where the **model** is registered. |
+| `ENDPOINT_DISPLAY_NAME` | `custom-llm-endpoint` | Used to find or create an endpoint when `ENDPOINT_ID` is unset. |
+| `DEPLOYED_MODEL_DISPLAY_NAME` | `custom-llm-deployed` | Name of this deployment on the endpoint. |
+| `ENDPOINT_ID` | *(empty)* | If set, deploy attaches to this endpoint instead of searching by `ENDPOINT_DISPLAY_NAME`. After first deploy, set this for inference. |
 
 ### Hardware
 
 | Variable | Default | Notes |
 |----------|---------|--------|
-| `USE_GPU` | `true` | Set to `false` for CPU-only. |
-| `MACHINE_TYPE` | `n1-standard-4` | Must be compatible with chosen accelerators. |
+| `USE_GPU` | `true` | `false` for CPU-only. |
+| `MACHINE_TYPE` | `n1-standard-4` | Compatible with accelerators / workload. |
 | `ACCELERATOR_TYPE` | `NVIDIA_TESLA_T4` | Ignored when `USE_GPU=false`. |
 | `ACCELERATOR_COUNT` | `1` | |
 | `MIN_REPLICA_COUNT` / `MAX_REPLICA_COUNT` | `1` | |
@@ -111,18 +92,19 @@ Create a file named **`.env`** in the project root (same folder as `requirements
 
 ### Optional staging bucket
 
+Some Vertex workflows expect a **staging** GCS URI in `aiplatform.init`. If you omit both of the following, init runs **without** `staging_bucket` (fine for deploy-only in many cases).
+
 | Variable | Description |
 |----------|-------------|
-| `STAGING_BUCKET_URI` | If unset, defaults to `gs://{GCS_BUCKET_NAME}/vertex-staging`. |
+| `STAGING_BUCKET_URI` | Full `gs://...` staging prefix. |
+| `GCS_BUCKET_NAME` | If set (and `STAGING_BUCKET_URI` unset), staging defaults to `gs://{GCS_BUCKET_NAME}/vertex-staging`. |
 
-### Example `.env`
+### Example `.env` (by display name)
 
 ```env
 GCP_PROJECT_ID=my-project
 GCP_REGION=us-central1
-GCS_BUCKET_NAME=my-model-bucket
-GCS_MODEL_ARTIFACT_PREFIX=models/my-llm/v1
-SERVING_CONTAINER_IMAGE_URI=us-docker.pkg.dev/vertex-ai/prediction/pytorch-gpu.2-2:latest
+MODEL_DISPLAY_NAME=my-registered-llm
 
 USE_GPU=true
 MACHINE_TYPE=n1-standard-4
@@ -130,56 +112,58 @@ ACCELERATOR_TYPE=NVIDIA_TESLA_T4
 ACCELERATOR_COUNT=1
 ```
 
-For CPU-only deployment, set `USE_GPU=false` and pick a CPU-appropriate `MACHINE_TYPE` and CPU serving image.
+### Example `.env` (by model resource ID)
+
+```env
+GCP_PROJECT_ID=my-project
+GCP_REGION=us-central1
+REGISTRY_MODEL_RESOURCE_NAME=1234567890123456789
+```
 
 ---
 
-## 4. Deploy the model
-
-With the venv activated and `.env` in place, from the project root:
+## 4. Deploy
 
 ```bash
 python -m src.deploy
 ```
 
-What this does in order:
+What happens:
 
-1. Initializes the Vertex AI client for your project and region.
-2. Looks for an existing model with `MODEL_DISPLAY_NAME`; if found, skips upload.
-3. Otherwise uploads from `gs://{GCS_BUCKET_NAME}/{GCS_MODEL_ARTIFACT_PREFIX}` using your serving container settings.
-4. Reuses an endpoint named `ENDPOINT_DISPLAY_NAME`, uses `ENDPOINT_ID` if set, or creates a new endpoint.
-5. Deploys the model and waits until deployed models appear or the timeout is reached.
+1. Initializes the Vertex AI SDK for `GCP_PROJECT_ID` and `GCP_REGION`.
+2. Loads the model from Model Registry (**by resource name/ID, or by listing and matching `MODEL_DISPLAY_NAME`**). **No upload.**
+3. Uses `ENDPOINT_ID` if set; otherwise finds or creates an endpoint named `ENDPOINT_DISPLAY_NAME`.
+4. Calls `endpoint.deploy(...)` with your machine/accelerator settings and waits (LRO + polling) until deployed models appear or timeout.
 
-On success, the script prints a line to **stderr** telling you to set **`ENDPOINT_ID`**—add that value to `.env`:
+On success, stderr reminds you to set **`ENDPOINT_ID`** for prediction:
 
 ```env
 ENDPOINT_ID=1234567890123456789
 ```
 
-Logs are JSON lines on stdout (severity, message, and any `extra` fields).
+Logs are JSON lines on stdout.
 
 ---
 
-## 5. Run a test prediction
+## 5. Test prediction
 
-After `ENDPOINT_ID` is set in `.env`:
+After `ENDPOINT_ID` is in `.env`:
 
 ```bash
 python -m src.inference
 ```
 
-The sample payload is defined in `src/inference.py` (`default_sample_instances`). **You must change it** to match your container’s expected JSON schema (vLLM/TGI/PyTorch samples differ).
+Adjust `default_sample_instances()` in `src/inference.py` so the payload matches your model’s `/predict` contract.
 
 ---
 
-## 6. Quick command reference
+## 6. Command reference
 
 | Step | Command |
 |------|---------|
-| Install + ADC (Bash) | `bash setup_env.sh` |
-| Activate venv (Bash) | `source .venv/bin/activate` |
-| Activate venv (Windows CMD) | `.venv\Scripts\activate.bat` |
-| Activate venv (PowerShell) | `.\.venv\Scripts\Activate.ps1` |
+| Setup (Bash) | `bash setup_env.sh` |
+| Activate (Bash) | `source .venv/bin/activate` |
+| Activate (PowerShell) | `.\.venv\Scripts\Activate.ps1` |
 | Deploy | `python -m src.deploy` |
 | Predict | `python -m src.inference` |
 
@@ -187,26 +171,16 @@ The sample payload is defined in `src/inference.py` (`default_sample_instances`)
 
 ## Troubleshooting
 
-- **`Unauthenticated` / ADC errors**  
-  Run `gcloud auth application-default login` again. The Python SDK uses Application Default Credentials, not only `gcloud auth login`.
-
-- **`Permission denied` / IAM**  
-  Confirm the active account has Vertex AI and GCS access on the project and bucket.
-
-- **`Quota exceeded`**  
-  Request quota for the chosen `MACHINE_TYPE` and `ACCELERATOR_TYPE` in that region, or switch to smaller machine/accelerator counts.
-
-- **`InvalidArgument` on predict**  
-  Your `instances` payload does not match the serving container. Align with the image’s HTTP API (routes and body shape).
-
-- **Windows: `pip install` fails with “file is being used”**  
-  Close editors or processes locking `.venv`, then run `pip install -r requirements.txt` again.
-
-- **Path with spaces**  
-  Quote paths in shells: `cd "C:\Users\...\GCP Vertex AI"`.
+- **`Configuration error: Set MODEL_DISPLAY_NAME...`** — Provide either `MODEL_DISPLAY_NAME` or `REGISTRY_MODEL_RESOURCE_NAME` in `.env`.
+- **`No Model found in registry with display_name=...`** — Name must match exactly, or use `REGISTRY_MODEL_RESOURCE_NAME`.
+- **`Unauthenticated`** — Run `gcloud auth application-default login`.
+- **`Permission denied`** — Vertex AI / endpoint permissions on the project.
+- **`Quota exceeded`** — Quota for `MACHINE_TYPE` / accelerators in that region.
+- **`FailedPrecondition` on deploy** — Model may not support online deployment, or endpoint/state conflicts; see error message in Cloud Logging.
+- **`InvalidArgument` on predict** — Payload does not match the serving container.
 
 ---
 
 ## Further reading
 
-- [Vertex AI prebuilt prediction containers](https://cloud.google.com/vertex-ai/docs/predictions/pre-built-containers) — choose an image URI that matches your framework and GPU/CPU target.
+- [Deploy a model to an endpoint](https://cloud.google.com/vertex-ai/docs/general/deployment) — Vertex AI deployment overview.

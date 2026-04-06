@@ -22,6 +22,13 @@ from google.cloud import aiplatform
 from src.config import configure_logging, get_settings
 
 
+def _refresh_endpoint(endpoint: aiplatform.Endpoint) -> None:
+    if hasattr(endpoint, "reload"):
+        endpoint.reload()
+    else:
+        endpoint._sync_gca_resource()
+
+
 def default_sample_instances() -> list[dict]:
     """
     Generic placeholder; replace keys to match your model server's `/predict` schema.
@@ -48,11 +55,13 @@ def main() -> int:
         return 1
 
     try:
-        aiplatform.init(
-            project=settings.gcp_project_id,
-            location=settings.gcp_region,
-            staging_bucket=settings.staging_uri,
-        )
+        init_kw: dict = {
+            "project": settings.gcp_project_id,
+            "location": settings.gcp_region,
+        }
+        if settings.staging_uri:
+            init_kw["staging_bucket"] = settings.staging_uri
+        aiplatform.init(**init_kw)
     except gcp_exceptions.Unauthenticated as e:
         log.error(
             "Authentication failed — run gcloud auth application-default login",
@@ -70,6 +79,19 @@ def main() -> int:
         return 1
 
     endpoint = aiplatform.Endpoint(settings.endpoint_id)
+    _refresh_endpoint(endpoint)
+    deployed = list(endpoint.list_models())
+    if not deployed:
+        log.error(
+            "No model is deployed on this endpoint yet (traffic_split is empty). "
+            "An earlier deploy may have failed or still be running. Run: python -m src.deploy",
+            extra={
+                "endpoint_id": settings.endpoint_id,
+                "endpoint_resource": endpoint.resource_name,
+            },
+        )
+        return 1
+
     instances = default_sample_instances()
     parameters: dict = {}
 
@@ -87,13 +109,30 @@ def main() -> int:
         log.error("Quota or rate limit exceeded", extra={"error": str(e)})
         return 1
     except gcp_exceptions.InvalidArgument as e:
-        log.error(
-            "Invalid payload for this endpoint — adjust instances to match the container",
-            extra={"error": str(e)},
-        )
+        err = str(e)
+        if "traffic_split" in err.lower():
+            log.error(
+                "Endpoint has no deployment or traffic split (model not serving). "
+                "Run python -m src.deploy and wait until it completes, or check the "
+                "endpoint in Google Cloud Console.",
+                extra={"error": err},
+            )
+        else:
+            log.error(
+                "Invalid payload for this endpoint — adjust instances to match the container",
+                extra={"error": err},
+            )
         return 1
     except gcp_exceptions.GoogleAPICallError as e:
-        log.error("Predict call failed", extra={"error": str(e)})
+        err = str(e)
+        if "traffic_split" in err.lower():
+            log.error(
+                "Endpoint misconfigured: no traffic to a deployed model. "
+                "Complete deployment with: python -m src.deploy",
+                extra={"error": err},
+            )
+        else:
+            log.error("Predict call failed", extra={"error": err})
         return 1
 
     out = {

@@ -1,5 +1,8 @@
 """
-Upload a custom model from GCS to Vertex AI Model Registry and deploy to an Endpoint.
+Deploy an existing Vertex AI Model Registry model to an Endpoint.
+
+Assumes the model is already registered (artifacts and container spec are on the Model resource).
+Does not upload or create registry entries.
 
 Run from repo root:  python -m src.deploy
 """
@@ -22,11 +25,28 @@ from google.cloud import aiplatform
 from src.config import configure_logging, get_settings
 
 
-def _find_model_by_display_name(display_name: str) -> Optional[aiplatform.Model]:
-    for m in aiplatform.Model.list():
-        if m.display_name == display_name:
-            return m
-    return None
+def _refresh_endpoint(endpoint: aiplatform.Endpoint) -> None:
+    """
+    Fetch latest endpoint state from the API.
+    google-cloud-aiplatform Endpoint has no public reload(); sync uses _sync_gca_resource().
+    """
+    if hasattr(endpoint, "reload"):
+        endpoint.reload()
+    else:
+        endpoint._sync_gca_resource()
+
+
+def _model_sort_key(m: aiplatform.Model) -> tuple:
+    """Prefer newest version when multiple registry entries share a display name."""
+    try:
+        t = m.version_create_time
+        return (int(t.seconds), int(t.nanos))
+    except Exception:
+        return (0, 0)
+
+
+def _find_models_by_display_name(display_name: str) -> list[aiplatform.Model]:
+    return [m for m in aiplatform.Model.list() if m.display_name == display_name]
 
 
 def _find_endpoint_by_display_name(display_name: str) -> Optional[aiplatform.Endpoint]:
@@ -34,6 +54,48 @@ def _find_endpoint_by_display_name(display_name: str) -> Optional[aiplatform.End
         if e.display_name == display_name:
             return e
     return None
+
+
+def _resolve_registered_model(
+    log,
+    settings,
+) -> aiplatform.Model:
+    if settings.registry_model_resource_name and settings.registry_model_resource_name.strip():
+        ref = settings.registry_model_resource_name.strip()
+        log.info(
+            "Loading registered model by resource name or ID",
+            extra={"registry_model_ref": ref},
+        )
+        return aiplatform.Model(
+            ref,
+            version=settings.registry_model_version,
+        )
+
+    display = settings.model_display_name.strip()
+    matches = _find_models_by_display_name(display)
+    if not matches:
+        raise LookupError(
+            f"No Model found in registry with display_name={display!r} in project "
+            f"{settings.gcp_project_id} region {settings.gcp_region}. "
+            "Use REGISTRY_MODEL_RESOURCE_NAME if the display name differs or you need a specific resource."
+        )
+
+    if len(matches) > 1:
+        matches.sort(key=_model_sort_key, reverse=True)
+        log.warning(
+            "Multiple models share this display name; deploying the newest version by version_create_time",
+            extra={"display_name": display, "match_count": len(matches)},
+        )
+
+    chosen = matches[0]
+    log.info(
+        "Resolved model from registry by display name",
+        extra={
+            "display_name": display,
+            "model_resource_name": chosen.resource_name,
+        },
+    )
+    return chosen
 
 
 def _wait_for_deployment(
@@ -70,7 +132,7 @@ def _wait_for_deployment(
 
     deadline = overall_deadline
     while time.monotonic() < deadline:
-        endpoint.reload()
+        _refresh_endpoint(endpoint)
         deployed = list(endpoint.list_models())
         if deployed:
             logger.info(
@@ -90,15 +152,23 @@ def _wait_for_deployment(
 
 
 def main() -> int:
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+
     log = configure_logging(settings.log_level)
 
+    init_kwargs = {
+        "project": settings.gcp_project_id,
+        "location": settings.gcp_region,
+    }
+    if settings.staging_uri:
+        init_kwargs["staging_bucket"] = settings.staging_uri
+
     try:
-        aiplatform.init(
-            project=settings.gcp_project_id,
-            location=settings.gcp_region,
-            staging_bucket=settings.staging_uri,
-        )
+        aiplatform.init(**init_kwargs)
     except gcp_exceptions.Unauthenticated as e:
         log.error(
             "Authentication failed — run gcloud auth application-default login",
@@ -107,7 +177,7 @@ def main() -> int:
         return 1
     except gcp_exceptions.Forbidden as e:
         log.error(
-            "Permission denied — check IAM roles (e.g. Vertex AI User, Storage)",
+            "Permission denied — check IAM roles (e.g. Vertex AI User)",
             extra={"error": str(e)},
         )
         return 1
@@ -120,51 +190,25 @@ def main() -> int:
         extra={
             "project": settings.gcp_project_id,
             "region": settings.gcp_region,
-            "artifact_uri": settings.artifact_uri,
+            "staging_bucket": settings.staging_uri,
         },
     )
 
-    # --- Model: reuse if same display name exists ---
-    model: Optional[aiplatform.Model] = None
     try:
-        existing = _find_model_by_display_name(settings.model_display_name)
-        if existing is not None:
-            log.info(
-                "Model already in registry; skipping upload",
-                extra={"model_resource_name": existing.resource_name},
-            )
-            model = existing
-        else:
-            log.info("Uploading model from GCS to Model Registry")
-            model = aiplatform.Model.upload(
-                display_name=settings.model_display_name,
-                description=settings.model_description,
-                artifact_uri=settings.artifact_uri,
-                serving_container_image_uri=settings.serving_container_image_uri,
-                serving_container_predict_route=settings.serving_container_predict_route,
-                serving_container_health_route=settings.serving_container_health_route,
-                serving_container_ports=settings.serving_container_ports,
-                sync=True,
-            )
-            log.info(
-                "Model upload complete",
-                extra={"model_resource_name": model.resource_name},
-            )
-    except gcp_exceptions.ResourceExhausted as e:
-        log.error("Quota exceeded", extra={"error": str(e)})
+        model = _resolve_registered_model(log, settings)
+    except LookupError as e:
+        log.error(str(e))
         return 1
     except gcp_exceptions.GoogleAPICallError as e:
-        log.error("Model upload or registry check failed", extra={"error": str(e)})
+        log.error("Failed to load model from registry", extra={"error": str(e)})
         return 1
-
-    assert model is not None
 
     # --- Endpoint: get by display name, optional endpoint_id override ---
     endpoint: Optional[aiplatform.Endpoint] = None
     try:
         if settings.endpoint_id:
             endpoint = aiplatform.Endpoint(settings.endpoint_id)
-            endpoint.reload()
+            _refresh_endpoint(endpoint)
             log.info(
                 "Using existing endpoint from ENDPOINT_ID",
                 extra={"endpoint_id": settings.endpoint_id, "resource_name": endpoint.resource_name},
@@ -222,7 +266,7 @@ def main() -> int:
         return 1
     except gcp_exceptions.FailedPrecondition as e:
         log.error(
-            "Deploy precondition failed (endpoint state, machine quota, or image)",
+            "Deploy precondition failed (endpoint state, machine quota, or model cannot be deployed)",
             extra={"error": str(e)},
         )
         return 1
@@ -242,13 +286,14 @@ def main() -> int:
         log.error(str(e))
         return 1
 
-    endpoint.reload()
+    _refresh_endpoint(endpoint)
     endpoint_numeric_id = endpoint.resource_name.rsplit("/", 1)[-1]
     log.info(
         "Deploy finished",
         extra={
             "endpoint_id": endpoint_numeric_id,
             "endpoint_resource_name": endpoint.resource_name,
+            "model_resource_name": model.resource_name,
         },
     )
     print(
