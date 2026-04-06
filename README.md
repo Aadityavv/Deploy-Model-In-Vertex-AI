@@ -1,6 +1,6 @@
 # Vertex AI — deploy a registered model
 
-This project **only deploys models that already exist in Vertex AI Model Registry** (you or another process already uploaded artifacts and registered the model). You provide your **GCP project**, **region**, and **how to find that model** (display name or resource ID). The code creates or reuses an **Endpoint** and deploys the model with your chosen machine/GPU settings—no Console UI required.
+This project **only deploys models that already exist in Vertex AI Model Registry** (you or another process already uploaded artifacts and registered the model). You provide your **GCP project**, **region**, and **how to find that model** (display name or resource ID). The code creates or reuses an **Endpoint** and deploys the model with **CPU-only** machine settings (no accelerators)—no Console UI required.
 
 ---
 
@@ -74,12 +74,11 @@ If several models share the same display name, deploy uses the **newest** by `ve
 
 ### Hardware
 
+Deployments are **CPU-only** (no GPU / TPU accelerators).
+
 | Variable | Default | Notes |
 |----------|---------|--------|
-| `USE_GPU` | `true` | `false` for CPU-only. |
-| `MACHINE_TYPE` | `n1-standard-4` | Compatible with accelerators / workload. |
-| `ACCELERATOR_TYPE` | `NVIDIA_TESLA_T4` | Ignored when `USE_GPU=false`. |
-| `ACCELERATOR_COUNT` | `1` | |
+| `MACHINE_TYPE` | `n1-standard-4` | Pick a type that fits your model (CPU). |
 | `MIN_REPLICA_COUNT` / `MAX_REPLICA_COUNT` | `1` | |
 
 ### Timeouts and logging
@@ -106,10 +105,7 @@ GCP_PROJECT_ID=my-project
 GCP_REGION=us-central1
 MODEL_DISPLAY_NAME=my-registered-llm
 
-USE_GPU=true
 MACHINE_TYPE=n1-standard-4
-ACCELERATOR_TYPE=NVIDIA_TESLA_T4
-ACCELERATOR_COUNT=1
 ```
 
 ### Example `.env` (by model resource ID)
@@ -175,7 +171,7 @@ Adjust `default_sample_instances()` in `src/inference.py` so the payload matches
 - **`No Model found in registry with display_name=...`** — Name must match exactly, or use `REGISTRY_MODEL_RESOURCE_NAME`.
 - **`Unauthenticated`** — Run `gcloud auth application-default login`.
 - **`Permission denied`** — Vertex AI / endpoint permissions on the project.
-- **`Quota exceeded`** — Quota for `MACHINE_TYPE` / accelerators in that region.
+- **`Quota exceeded`** — Quota for `MACHINE_TYPE` in that region.
 - **`FailedPrecondition` on deploy** — Model may not support online deployment, or endpoint/state conflicts; see error message in Cloud Logging.
 - **`InvalidArgument` on predict** — Payload does not match the serving container.
 

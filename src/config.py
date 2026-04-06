@@ -118,18 +118,18 @@ class Settings(BaseSettings):
     endpoint_id: Optional[str] = None
     """If set, deploy targets this endpoint; inference uses this ID."""
 
-    # --- Hardware ---
-    use_gpu: bool = True
+    # --- Hardware (CPU-only; no accelerators) ---
     machine_type: str = "n1-standard-4"
-    accelerator_type: Optional[str] = "NVIDIA_TESLA_T4"
-    """Vertex accelerator enum, e.g. NVIDIA_TESLA_T4, NVIDIA_L4. Ignored if use_gpu is False."""
-    accelerator_count: int = Field(default=1, ge=0)
 
     min_replica_count: int = Field(default=1, ge=1)
     max_replica_count: int = Field(default=1, ge=1)
 
     # --- Deployment wait ---
-    deploy_timeout_seconds: int = Field(default=3600, ge=60)
+    deploy_timeout_seconds: int = Field(
+        default=3600,
+        ge=1800,
+        description="Minimum 1800s (30m) recommended for large container images / GCS artifact pulls.",
+    )
     deploy_poll_interval_seconds: float = Field(default=30.0, ge=5.0)
 
     log_level: str = "INFO"

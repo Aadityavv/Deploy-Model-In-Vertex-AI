@@ -241,23 +241,22 @@ def main() -> int:
         "min_replica_count": settings.min_replica_count,
         "max_replica_count": settings.max_replica_count,
         "sync": False,
+        # Route 100% traffic to the newly deployed revision ("0" = placeholder for this deploy request).
+        "traffic_split": {"0": 100},
+        # vLLM must match Model Registry container ports (8080). Not an Endpoint.deploy() argument —
+        # popped before deploy(); confirm the registered Model spec lists this port.
+        "serving_container_ports": [8080],
     }
-    if settings.use_gpu and settings.accelerator_type and settings.accelerator_count > 0:
-        deploy_kwargs["accelerator_type"] = settings.accelerator_type
-        deploy_kwargs["accelerator_count"] = settings.accelerator_count
-        log.info(
-            "Deploying with GPU",
-            extra={
-                "machine_type": settings.machine_type,
-                "accelerator_type": settings.accelerator_type,
-                "accelerator_count": settings.accelerator_count,
-            },
-        )
-    else:
-        log.info(
-            "Deploying CPU-only",
-            extra={"machine_type": settings.machine_type},
-        )
+    log.info(
+        "Deploying CPU-only (no accelerators)",
+        extra={"machine_type": settings.machine_type},
+    )
+
+    serving_ports = deploy_kwargs.pop("serving_container_ports", None)
+    log.info(
+        "Container ports (verify Model Registry model matches vLLM / Vertex expectations)",
+        extra={"serving_container_ports": serving_ports},
+    )
 
     try:
         deploy_operation = endpoint.deploy(**deploy_kwargs)
