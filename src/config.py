@@ -118,8 +118,12 @@ class Settings(BaseSettings):
     endpoint_id: Optional[str] = None
     """If set, deploy targets this endpoint; inference uses this ID."""
 
-    # --- Hardware (CPU-only; no accelerators) ---
-    machine_type: str = "n1-standard-4"
+    # --- Hardware (defaults: CPU-only — no GPU quota required) ---
+    use_gpu: bool = False
+    """Set true only if you have GPU quota and a GPU-capable serving image."""
+    machine_type: str = "n1-standard-8"
+    accelerator_type: Optional[str] = None
+    accelerator_count: int = Field(default=0, ge=0)
 
     min_replica_count: int = Field(default=1, ge=1)
     max_replica_count: int = Field(default=1, ge=1)

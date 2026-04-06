@@ -247,10 +247,22 @@ def main() -> int:
         # popped before deploy(); confirm the registered Model spec lists this port.
         "serving_container_ports": [8080],
     }
-    log.info(
-        "Deploying CPU-only (no accelerators)",
-        extra={"machine_type": settings.machine_type},
-    )
+    if settings.use_gpu and settings.accelerator_type and settings.accelerator_count > 0:
+        deploy_kwargs["accelerator_type"] = settings.accelerator_type
+        deploy_kwargs["accelerator_count"] = settings.accelerator_count
+        log.info(
+            "Deploying with GPU",
+            extra={
+                "machine_type": settings.machine_type,
+                "accelerator_type": settings.accelerator_type,
+                "accelerator_count": settings.accelerator_count,
+            },
+        )
+    else:
+        log.info(
+            "Deploying CPU-only (no accelerators)",
+            extra={"machine_type": settings.machine_type},
+        )
 
     serving_ports = deploy_kwargs.pop("serving_container_ports", None)
     log.info(

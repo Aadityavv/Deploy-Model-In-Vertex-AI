@@ -1,6 +1,6 @@
 # Vertex AI — deploy a registered model
 
-This project **only deploys models that already exist in Vertex AI Model Registry** (you or another process already uploaded artifacts and registered the model). You provide your **GCP project**, **region**, and **how to find that model** (display name or resource ID). The code creates or reuses an **Endpoint** and deploys the model with **CPU-only** machine settings (no accelerators)—no Console UI required.
+This project **only deploys models that already exist in Vertex AI Model Registry** (you or another process already uploaded artifacts and registered the model). You provide your **GCP project**, **region**, and **how to find that model** (display name or resource ID). The code creates or reuses an **Endpoint** and deploys with configurable machine settings—**defaults are CPU-only** (no GPU). If you use **vLLM / GPU-only** images, set **`USE_GPU=true`** and valid **`ACCELERATOR_*`** values; otherwise the model server may exit on startup.
 
 ---
 
@@ -74,11 +74,14 @@ If several models share the same display name, deploy uses the **newest** by `ve
 
 ### Hardware
 
-Deployments are **CPU-only** (no GPU / TPU accelerators).
+**Default: CPU only** — no `accelerator_type` / `accelerator_count` in the deploy request.
 
 | Variable | Default | Notes |
 |----------|---------|--------|
-| `MACHINE_TYPE` | `n1-standard-4` | Pick a type that fits your model (CPU). |
+| `USE_GPU` | `false` | Set `true` only with GPU quota and a GPU serving image. |
+| `MACHINE_TYPE` | `n1-standard-8` | Larger CPU/RAM helps CPU inference; `n1-highmem-*` if you hit RAM limits. |
+| `ACCELERATOR_TYPE` | *(unset)* | e.g. `NVIDIA_TESLA_T4` when `USE_GPU=true`. |
+| `ACCELERATOR_COUNT` | `0` | e.g. `1` when `USE_GPU=true`. |
 | `MIN_REPLICA_COUNT` / `MAX_REPLICA_COUNT` | `1` | |
 
 ### Timeouts and logging
@@ -105,7 +108,9 @@ GCP_PROJECT_ID=my-project
 GCP_REGION=us-central1
 MODEL_DISPLAY_NAME=my-registered-llm
 
-MACHINE_TYPE=n1-standard-4
+# CPU-only (defaults — omit or set explicitly)
+USE_GPU=false
+MACHINE_TYPE=n1-standard-8
 ```
 
 ### Example `.env` (by model resource ID)
@@ -129,7 +134,7 @@ What happens:
 1. Initializes the Vertex AI SDK for `GCP_PROJECT_ID` and `GCP_REGION`.
 2. Loads the model from Model Registry (**by resource name/ID, or by listing and matching `MODEL_DISPLAY_NAME`**). **No upload.**
 3. Uses `ENDPOINT_ID` if set; otherwise finds or creates an endpoint named `ENDPOINT_DISPLAY_NAME`.
-4. Calls `endpoint.deploy(...)` with your machine/accelerator settings and waits (LRO + polling) until deployed models appear or timeout.
+4. Calls `endpoint.deploy(...)` with your machine type (and GPU accelerators only if `USE_GPU=true`) and waits (LRO + polling) until deployed models appear or timeout.
 
 On success, stderr reminds you to set **`ENDPOINT_ID`** for prediction:
 
@@ -171,7 +176,8 @@ Adjust `default_sample_instances()` in `src/inference.py` so the payload matches
 - **`No Model found in registry with display_name=...`** — Name must match exactly, or use `REGISTRY_MODEL_RESOURCE_NAME`.
 - **`Unauthenticated`** — Run `gcloud auth application-default login`.
 - **`Permission denied`** — Vertex AI / endpoint permissions on the project.
-- **`Quota exceeded`** — Quota for `MACHINE_TYPE` in that region.
+- **`Quota exceeded`** — Quota for `MACHINE_TYPE` / accelerators in that region.
+- **`Model server exited unexpectedly`** — Container crash (OOM, wrong entrypoint, **GPU-only image on CPU**, etc.). Match **`USE_GPU`** / **`MACHINE_TYPE`** to your image; read the container traceback in Cloud Logging.
 - **`FailedPrecondition` on deploy** — Model may not support online deployment, or endpoint/state conflicts; see error message in Cloud Logging.
 - **`InvalidArgument` on predict** — Payload does not match the serving container.
 
